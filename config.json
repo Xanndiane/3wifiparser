@@ -1,0 +1,9 @@
+{
+    "map_async_level": 5,
+    "pass_async_level": 10,
+    "pass_threads_cnt": 1,
+    "scan_passwords": true,
+    "save_raw_answers": false,
+    "rescan_on_error": true,
+    "limit_rescans": true
+}

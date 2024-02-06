@@ -1,11 +1,15 @@
 import aiohttp
 import asyncio
 import json
-import db
 import math
-from threading import Thread
+import threading
+import sqlite3
+from sys import argv
+
+db = sqlite3.connect("main.db", check_same_thread=False)
 
 map_end = False
+db_lock = threading.Lock()
 
 config = {
     "map_async_level": 5,
@@ -33,7 +37,8 @@ async def load(session, tile1, tile2, zoom, rescan_level=0):
       'Accept': 'text/plain', 
       'Host': '3wifi.stascorp.com' 
     } 
-    r = await session.get(f'http://134.0.119.34/3wifi.php?a=map&scat=1&tileNumber={tile1},{tile2}&zoom={zoom}', headers=headers)
+    r = await session.get(f'https://134.0.119.34/3wifi.php?a=map&scat=1&tileNumber={tile1},{tile2}&zoom={zoom}', headers=headers)
+    #await asyncio.sleep(0.25)
     to_parse = await r.text()
     stdata = to_parse.find("{\"error\":")
     if stdata == -1:
@@ -45,7 +50,7 @@ async def load(session, tile1, tile2, zoom, rescan_level=0):
         await load(session, tile1, tile2, zoom, rescan_level=rescan_level + 1)
         return
     to_parse = to_parse[stdata:-2]
-    cur = db.db.cursor()
+    cur = db.cursor()
     if config["save_raw_answers"] and to_parse != "{\"error\":null,\"data\":{\"type\":\"FeatureCollection\",\"features\":[]}}":
         cur.execute("INSERT INTO raw_map (raw_answer) VALUES (?)", (to_parse, ))
         cur.execute("SELECT max(id) FROM raw_map")
@@ -63,6 +68,7 @@ async def load(session, tile1, tile2, zoom, rescan_level=0):
         await load(session, tile1, tile2, zoom, rescan_level=rescan_level + 1)
         return
     print(f"Found {len(to_parse)} networks")
+    nets = []
     if len(to_parse) > 0:
         for point in to_parse:
             if point["type"] == "Feature" or point["type"] == "Cluster":
@@ -88,11 +94,12 @@ async def load(session, tile1, tile2, zoom, rescan_level=0):
                         coords[1],
                         raw_id
                     )
-                    cur.execute("INSERT INTO networks (SSID, BSSID, lat, lon, rawmap_id) VALUES ((?),(?),(?),(?),(?))", net)
+                    nets.append(net)
         try:
-            db.db.commit()
-        except:
-            pass
+            cur.executemany("INSERT INTO networks (SSID, BSSID, lat, lon, rawmap_id) VALUES ((?),(?),(?),(?),(?))", nets)
+            db.commit()
+        except Exception as e:
+            print("DB map scan err: " + str(e))
     cur.close()
     
 
@@ -106,11 +113,27 @@ def from_geo_to_pixels(lat, long, projection, z):
     return [x_p // 256, y_p // 256]
 
 async def main():
-    pos1str = input("pos1: ")
+    dis_input = False
+    if len(argv) > 1:
+        dis_input = True
+        if len(argv) == 2:
+            pos1str = argv[1]
+        elif len(argv) == 3:
+            pos1str = argv[1]
+            pos2str = argv[2]
+        elif len(argv) == 4:
+            pos1str = argv[1]
+            pos2str = argv[2]
+            z = argv[3]
+        else:
+            dis_input = False
+            print("Неверные аргументы")
+    if not(dis_input):
+        pos1str = input("pos1: ")
     progress = 0
     if pos1str.startswith("save"):
         task_id = pos1str[4:]
-        cur = db.db.cursor()
+        cur = db.cursor()
         cur.execute("SELECT * FROM tasks WHERE id=(?)", (task_id,))
         task_d = cur.fetchone()
         if task_d == None or len(task_d) < 1:
@@ -126,10 +149,13 @@ async def main():
         border1 = pos1str.split(",")
         border1[0] = float(border1[0])
         border1[1] = float(border1[1])
-        border2 = input("pos2: ").split(",")
+        if not(dis_input):
+            pos2str = input("pos2: ")
+        border2 = pos2str.split(",")
         border2[0] = float(border2[0])
         border2[1] = float(border2[1])
-        z = input("z (enter - 17): ")
+        if not(dis_input):
+            z = input("z (enter - 17): ")
         if len(z.strip()) == 0:
             z = 17
         else:
@@ -142,13 +168,13 @@ async def main():
         tiles_cnt = (min_maxTileX[1] - min_maxTileX[0] + 1) * (min_maxTileY[1] - min_maxTileY[0] + 1)
         print(f"Need to scan {tiles_cnt} tiles")
         middle_coords = [round((border1[0] + border2[0]) * 500000) / 1000000, round((border1[1] + border2[1]) * 500000) / 1000000]
-        cur = db.db.cursor()
+        cur = db.cursor()
         cur.execute("INSERT INTO tasks (min_maxTileX, min_maxTileY, progress, pos, z) VALUES ((?),(?),(?),(?),(?))", (json.dumps(min_maxTileX), json.dumps(min_maxTileY), 0, json.dumps(middle_coords), z))
         cur.execute("SELECT max(id) FROM tasks")
         task_id = cur.fetchone()[0]
         cur.close()
-        db.db.commit()
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as session:
+        db.commit()
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True, verify_ssl=False)) as session:
         tasks = []
         tile1 = None
         prog_cnt = 0
@@ -166,16 +192,16 @@ async def main():
                         if len(tasks) >= config["map_async_level"]:
                             await asyncio.gather(*tasks)
                             tasks = []
-                            cur = db.db.cursor()
-                            cur.execute(f"UPDATE tasks SET progress={prog_cnt} WHERE id={task_id}")
+                            cur = db.cursor()
+                            cur.execute("UPDATE tasks SET progress=(?) WHERE id=(?)", (prog_cnt, task_id))
                             cur.close()
-                            db.db.commit()
+                            db.commit()
                             print(f"Progress: {(prog_cnt * 100) // tiles_cnt}%")
                     except Exception as e:
                         print("######### " + str(e))
                 prog_cnt += 1
-    db.db.execute("DELETE FROM tasks WHERE id=(?)", (task_id,))
-    db.db.commit()
+    db.execute("DELETE FROM tasks WHERE id=(?)", (task_id,))
+    db.commit()
 
 thread_tasks = []
 passwd_threads = []
@@ -186,22 +212,22 @@ async def get_passwords(session, bssids: list):
         'Accept': 'text/plain', 
         'Host': '3wifi.stascorp.com' 
     } 
-    tasks = [asyncio.create_task(session.get("http://134.0.119.34/api/ajax.php?Version=0.51&Key=23ZRA8UBSLsdhbdJMp7IpbbsrDFDLuBC&Query=Find&BSSID=" + i, headers=headers)) for i in bssids]
+    tasks = [asyncio.create_task(session.get("https://134.0.119.34/api/ajax.php?Version=0.51&Key=23ZRA8UBSLsdhbdJMp7IpbbsrDFDLuBC&Query=Find&BSSID=" + i, headers=headers)) for i in bssids]
     responses = await asyncio.gather(*tasks)
     cnt = 0
-    cur = db.db.cursor()
+    cur = db.cursor()
+    to_base = []
     for resp in responses:
-        resp = await resp.text()
-        try:
-            cur.execute("UPDATE networks SET API_ANS=(?) WHERE bssid=(?)", (resp, bssids[cnt]))
-        except Exception as e:
-            print("$$$$ " + str(e))
+        to_base.append((await resp.text(), bssids[cnt]))
         cnt += 1
-    cur.close()
-    bssids.clear()
     try:
-        db.db.commit()
-    except:
+        with db_lock:
+            cur.executemany("UPDATE networks SET API_ANS=(?) WHERE bssid=(?)", to_base)
+            cur.close()
+            bssids.clear()
+            db.commit()
+    except Exception as e:
+        print("api_ans upd erorr: " + str(e))
         pass
 
 def thread_balancer(threads_cnt, async_limit=8):
@@ -209,10 +235,9 @@ def thread_balancer(threads_cnt, async_limit=8):
     for i in range(threads_cnt):
         for y in thread_tasks[i]:
             all_queued.append(y)
-    cursor = db.db.cursor()
-    cursor.execute(f"SELECT DISTINCT bssid FROM networks WHERE API_ANS IS NULL AND bssid NOT in ({str(all_queued)[1:-1]}) LIMIT {int(async_limit) * threads_cnt}")
+    cursor = db.cursor()
+    cursor.execute("SELECT DISTINCT bssid FROM networks WHERE API_ANS IS NULL AND bssid NOT in (?) LIMIT (?)", (str(all_queued)[1:-1], int(async_limit) * threads_cnt))
     bssids = cursor.fetchall()
-    #cursor.execute(f"UPDATE networks SET API_ANS=\"\" WHERE bssid in ({str([i[0] for i in bssids])[1:-1]})")
     cursor.close()
     thread_tasks_cnt = []
     for i in range(threads_cnt):
@@ -228,17 +253,20 @@ def thread_balancer(threads_cnt, async_limit=8):
 
 async def pool_passwords(thread_ind=0, async_limit=8):
     global map_end
-    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True)) as session:
+    async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(force_close=True, verify_ssl=False)) as session:
         while not(map_end) or len(thread_tasks[thread_ind]) > 0:
             try:
                 if len(thread_tasks[thread_ind]) > 0:
                     if len(thread_tasks[thread_ind]) < async_limit:
-                        thread_balancer(config["pass_threads_cnt"], async_limit)
+                        with db_lock:
+                            thread_balancer(config["pass_threads_cnt"], async_limit)
                     await get_passwords(session, thread_tasks[thread_ind])
-                    thread_balancer(config["pass_threads_cnt"], async_limit)
+                    with db_lock:
+                        thread_balancer(config["pass_threads_cnt"], async_limit)
                 else:
-                    thread_balancer(config["pass_threads_cnt"], async_limit)
-                    await asyncio.sleep(0.2)
+                    with db_lock:
+                        thread_balancer(config["pass_threads_cnt"], async_limit)
+                    await asyncio.sleep(0.5)
             except Exception as e:
                 print("pool " + str(e))
 
@@ -248,7 +276,7 @@ def start_passwords_scan():
         thread_tasks.append([])
     thread_balancer(config["pass_threads_cnt"], config["pass_async_level"])
     for i in range(config["pass_threads_cnt"]):
-        th = Thread(target=asyncio.run, name=f"3wifiparser{i}", args=(pool_passwords(i, config["pass_async_level"]), ))
+        th = threading.Thread(target=asyncio.run, name=f"3wifiparser{i}", args=(pool_passwords(i, config["pass_async_level"]), ))
         passwd_threads.append(th)
         th.start()
 
