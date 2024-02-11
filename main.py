@@ -50,7 +50,6 @@ async def load(session: aiohttp.ClientSession, tile1, tile2, zoom, rescan_level=
         print("map get err, rescan")
         await asyncio.sleep(2)
         await load(session, tile1, tile2, zoom, rescan_level=rescan_level + 1)
-        session.connector.
         return
     to_parse = await r.text()
     stdata = to_parse.find("{\"error\":")
