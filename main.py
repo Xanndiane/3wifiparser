@@ -10,6 +10,7 @@ db = sqlite3.connect("main.db", check_same_thread=False)
 
 map_end = False
 db_lock = threading.Lock()
+protocol = "http"
 
 config = {
     "map_async_level": 5,
@@ -18,27 +19,39 @@ config = {
     "scan_passwords": True,
     "save_raw_answers": False,
     "rescan_on_error": True,
-    "limit_rescans": True
+    "limit_rescans": True,
+    "use_https": False
 }
 
 try:
     with open("config.json", "r") as f:
         config = json.load(f)
+        if not("use_https" in config):
+            config["use_https"] = False
 except:
     with open("config.json", "w") as f:
         json.dump(config, f, indent=4)
+        
+if config["use_https"]:
+    protocol += "s"
 
-async def load(session, tile1, tile2, zoom, rescan_level=0):
+async def load(session: aiohttp.ClientSession, tile1, tile2, zoom, rescan_level=0):
     if rescan_level > 8 and config["limit_rescans"]:
         print("Too many rescans")
-        raise BaseException("Too many rescans")
+        return None
     headers = { 
       'Content-type': 'application/json',  
       'Accept': 'text/plain', 
       'Host': '3wifi.stascorp.com' 
-    } 
-    r = await session.get(f'https://134.0.119.34/3wifi.php?a=map&scat=1&tileNumber={tile1},{tile2}&zoom={zoom}', headers=headers)
-    #await asyncio.sleep(0.25)
+    }
+    try:
+        r = await session.get(f'{protocol}://134.0.119.34/3wifi.php?a=map&scat=1&tileNumber={tile1},{tile2}&zoom={zoom}', headers=headers)
+    except:
+        print("map get err, rescan")
+        await asyncio.sleep(2)
+        await load(session, tile1, tile2, zoom, rescan_level=rescan_level + 1)
+        session.connector.
+        return
     to_parse = await r.text()
     stdata = to_parse.find("{\"error\":")
     if stdata == -1:
@@ -212,7 +225,7 @@ async def get_passwords(session, bssids: list):
         'Accept': 'text/plain', 
         'Host': '3wifi.stascorp.com' 
     } 
-    tasks = [asyncio.create_task(session.get("https://134.0.119.34/api/ajax.php?Version=0.51&Key=23ZRA8UBSLsdhbdJMp7IpbbsrDFDLuBC&Query=Find&BSSID=" + i, headers=headers)) for i in bssids]
+    tasks = [asyncio.create_task(session.get("{protocol}://134.0.119.34/api/ajax.php?Version=0.51&Key=23ZRA8UBSLsdhbdJMp7IpbbsrDFDLuBC&Query=Find&BSSID=" + i, headers=headers)) for i in bssids]
     responses = await asyncio.gather(*tasks)
     cnt = 0
     cur = db.cursor()
